@@ -22,6 +22,7 @@ export class AppRunnerVPCDemo extends Stack {
     super(scope, id, props);
 
     const demoVpc = new ec2.Vpc(this, "AppRunnerDemoVPC");
+
     const demoECSCluster = new ecs.Cluster(this, "AppRunnerDemoCluster", {
       vpc: demoVpc,
       defaultCloudMapNamespace: {
@@ -98,7 +99,7 @@ export class AppRunnerVPCDemo extends Stack {
     const dbSecrets =
       dbCluster.secret ?? new secretsmgr.Secret(this, "RDSSecret");
 
-    // Demo private ECS service
+    // Create an ECS service that resides in private subnets
     const privateTaskDef = new ecs.FargateTaskDefinition(
       this,
       "PrivateFargateTaskDef",
@@ -131,101 +132,7 @@ export class AppRunnerVPCDemo extends Stack {
       }
     );
 
-    // Load balanced ecs public facing service
-    const taskDef = new ecs.FargateTaskDefinition(this, "FargateTaskDef", {});
-
-    const ncContainerDef = taskDef.addContainer("FrontendService", {
-      image: ecs.ContainerImage.fromAsset("../demo_app"),
-      portMappings: [
-        {
-          containerPort: 8080,
-        },
-      ],
-      environment: {
-        TARGET: dbCluster.clusterEndpoint.hostname,
-        TARGETPORT: "5432",
-        ECSPRIVATESERVICE:
-          `http://${privateDemoService.cloudMapService?.serviceName}.${demoECSCluster.defaultCloudMapNamespace?.namespaceName}:8080` ??
-          "demo.service",
-      },
-      secrets: {
-        DB_PASS: ecs.Secret.fromSecretsManager(dbSecrets, "password"),
-        DB_USER: ecs.Secret.fromSecretsManager(dbSecrets, "username"),
-        DB_HOST: ecs.Secret.fromSecretsManager(dbSecrets, "host"),
-      },
-      healthCheck: {
-        command: [
-          "CMD-SHELL",
-          "curl -f http://localhost:8080/health || exit 1",
-        ],
-        interval: Duration.seconds(5),
-      },
-      linuxParameters: new ecs.LinuxParameters(this, "initProcess", {
-        initProcessEnabled: true,
-      }),
-      logging: ecs.LogDriver.awsLogs({
-        streamPrefix: "apprunnerdemoservice",
-        logRetention: RetentionDays.ONE_WEEK,
-      }),
-    });
-
-    taskDef.addToTaskRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "ssmmessages:CreateControlChannel",
-          "ssmmessages:CreateDataChannel",
-          "ssmmessages:OpenControlChannel",
-          "ssmmessages:OpenDataChannel",
-        ],
-        resources: ["*"],
-      })
-    );
-
-    const ncService = new ecsPatterns.ApplicationLoadBalancedFargateService(
-      this,
-      "LBDemoService",
-      {
-        cluster: demoECSCluster,
-        taskDefinition: taskDef,
-        enableECSManagedTags: true,
-        circuitBreaker: {
-          rollback: true,
-        },
-      }
-    );
-
-    const cfnDbService = ncService.service.node.defaultChild as ecs.CfnService;
-    cfnDbService.enableExecuteCommand = true;
-
-    ncService.targetGroup.configureHealthCheck({
-      path: "/health",
-      interval: Duration.seconds(5),
-      timeout: Duration.seconds(2),
-    });
-
-    ncService.targetGroup.setAttribute(
-      "deregistration_delay.timeout_seconds",
-      "5"
-    );
-
-    dbCluster.connections.allowFrom(
-      ncService.service,
-      ec2.Port.tcp(5432),
-      "Connection from ECS NC service to backend database"
-    );
-
-    // Task Autoscaling
-    const ncServiceScaling = ncService.service.autoScaleTaskCount({
-      minCapacity: 1,
-      maxCapacity: 5,
-    });
-
-    ncServiceScaling.scaleOnRequestCount("RequestAutoScaling", {
-      requestsPerTarget: 25,
-      targetGroup: ncService.targetGroup,
-      scaleInCooldown: Duration.seconds(10),
-      scaleOutCooldown: Duration.seconds(10),
-    });
+    privateDemoService.connections.allowFromAnyIpv4(ec2.Port.tcp(8080));
 
     // Create an App Runner Service with a VPC Connector
     const appRunnerVpcConnector = new aws_apprunner.CfnVpcConnector(
@@ -309,9 +216,8 @@ export class AppRunnerVPCDemo extends Stack {
       }
     );
 
-    appRunnerService.node.addDependency(ncService);
-
-    privateDemoService.connections.allowFromAnyIpv4(ec2.Port.tcp(8080));
+    appRunnerService.node.addDependency(dbCluster);
+    appRunnerService.node.addDependency(privateDemoService);
 
     new CfnOutput(this, "AppRunnerVpcId", { value: demoVpc.vpcId });
 
