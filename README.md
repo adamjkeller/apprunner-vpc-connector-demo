@@ -150,6 +150,19 @@ const dbSecrets = dbCluster.secret ?? new secretsmgr.Secret(this, "RDSSecret");
 
 <details><summary> ECS Private Service </summary>
 
+Launching a container to Amazon ECS is straightforward (once you familiarize yourself with the terminology) and can be broken down into three steps:
+
+1. Define the task definition for the configuration around how your containers will run.
+   Choosing where to run your container (Fargate, EC2, ECS Anywhere), logging configurations, volumes, IAM roles to attach, etc.
+2. Within the task definition, define the containers that will run when the task is launched.
+   Here is where I configure container specific requirements, which in this instance is only to define the port that my container exposes and which container image to use. You can see in the code below that we are using the `ContainerImage` construct and taking advantage of the `fromAsset` method which will locate the Dockerfile and the CDK will build the image on our behalf and create/push to an ECR repo. There are additional flags that we can pass here, for more information check out the [documentation](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_ecs.ContainerDefinition.html).
+3. Determine how you want to launch your container: As a long running service, ad hoc, or as a part of some other orchestration like AWS Step Functions. In this case, we want ECS to ensure that the container is always running to serve traffic so we are creating an ECS Service to ensure the desired state is always met.
+
+The above flow is how we are defining and running our private ECS service, which is going to run in the private subnets of the VPC.
+Additionally, notice that when we create the service we define the name of the service under `cloudMapOptions`.
+This will automatically register our service into the service discovery namespace as `privateservice.apprunner.demo`.
+Because App Runner is connected to the VPC, we can take advantage of the private DNS namespace to resolve the hostname for the private ECS service.
+
 ```typescript
 const privateTaskDef = new ecs.FargateTaskDefinition(
   this,
@@ -183,6 +196,29 @@ privateDemoService.connections.allowFromAnyIpv4(ec2.Port.tcp(8080));
 </details>
 
 <details><summary> App Runner Service</summary>
+
+At the time of the creation of this walkthrough, the App Runner constructs avaialable are L1, which means they map directly to Cloudformation.
+There are a few things to discuss here, so I want to start by talking about how the App Runner service connects to the VPC.
+When connecting your service to an existing VPC, you need to create a VPC Connector in App Runner.
+The connector is what allows your App Runner service to egress into your VPC.
+For the connection to be established, a couple of parameters are required.
+First, you need to define the subnet id's that you want to egress into.
+Next, you will attach security groups to control network access into the VPC.
+You can attach multiple security groups and multiple subnets to a VPC connector, depending on the use case.
+Lastly, you can map multiple services to a single VPC connector, but only one VPC connector to a service.
+To dive into the deep details of how we implement this feature, check out this [blog](https://aws.amazon.com/blogs/containers/deep-dive-on-aws-app-runner-vpc-networking/)
+
+Next, we need to talk about the permission model and what permissions the app runner service needs vs what permissions the service needs while running.
+This is a bit confusing, so let's break it down:
+
+- The App Runner service role: As it says in the name, this is the role for the App Runner service itself (not your application) to make AWS API calls on our behalf.
+  In this case, we are building an image based service which requires App Runner to pull down container images from Amazon ECR.
+- The App Runner instance role: This is the role for OUR code, meaning that the AWS API calls being made from my application require the IAM policies attached to make the calls to AWS resources.
+  In our code example, we interact with AWS Secrets Manager, which we've added into the IAM policy attached to this role.
+
+Finally we have our App Runner service. This is where we define the configuration of our service which includes how to build our service (source code or from a container image), which VPC connector to use (if any), auto scaling, service and instance roles, and so on.
+
+We have some environment variables set in the configuration, and you may notice that we pass the secret ARN from the secret we created for the database and stored in in Secrets Manager. As mentioned above, we need this ARN to know which secret we will reference when making the call in our code. In addition, we pass in the url of the private service running in Amazon ECS so the code knows how to communicate to the ECS service. It's generally a good practice to move dynamic values that change based on environment as environment variables.
 
 ```typescript
 const appRunnerVpcConnector = new aws_apprunner.CfnVpcConnector(
