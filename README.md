@@ -7,7 +7,7 @@ The goal of this walkthrough is to showcase the VPC integration with AWS App Run
 
 ### Walkthrough
 
-The entire environment has been automated using the AWS CDK (Cloud Development Kit), which means the deployment is going to be relatively straightforward and only require a single command to get everything up and running.
+The entire environment has been automated using the AWS CDK (Cloud Development Kit), which means the deployment is going to be relatively straightforward and only requires a single command to get everything up and running.
 Prior to deploying the environment, we will walk through the code to better understand what we are deploying.
 Let's get right into it.
 
@@ -37,7 +37,7 @@ There are two files in which the code resides:
 - `bin/apprunner-vpc-demo.ts`: This is where we instantiate the CDK app and stack.
 - `lib/apprunner-vpc-demo-stack.ts`: Here is where all of the code lives that defines our stack resources and dependencies.
 
-In the below sections we will review the code in chunks and review what we are building.
+In the below sections we will review the code in chunks to better understand what we are building.
 
 <details><summary> Base resources </summary>
 
@@ -50,8 +50,9 @@ We'll see this later on in the walkthrough.
 
 The ECS cluster construct has a few more inputs to customize based on our needs.
 We want the cluster to reside in the VPC created above and want to create a namespace for service discovery (for services to communicate with this service via a friendly DNS name).
-Lastly, we enable the ecs excute command at the cluster level just in case we need to troubleshoot our tasks via ECS exec.
+Lastly, we enable the ecs execute command at the cluster level just in case we need to troubleshoot our tasks via ECS exec.
 All of that is being created in less than 10 lines of code.
+Also, remember that as a user of Amazon ECS I don't have to think about what version of the control plane i'm running, which is a huge benefit of using ECS.
 
 ```typescript
 const demoVpc = new ec2.Vpc(this, "AppRunnerDemoVPC");
@@ -73,16 +74,20 @@ const demoECSCluster = new ecs.Cluster(this, "AppRunnerDemoCluster", {
 <details><summary> Database resources </summary>
 
 To create our database cluster in RDS, we're going to use the `ServerlessCluster` construct.
-Once again this construct is going to many resources on our behalf, with only a few lines defining our requirements.
+Once again this construct is going to create many resources on our behalf, with only a few lines of code on our end defining our requirements.
 Things get interesting here, and let me explain the magic after the creation of the database cluster.
 I am a big fan of automating everything that is within reason and makes sense for the scenario.
 In this case, I need a database and table created on the RDS cluster.
-To do this in an automated way I need to ensure that the cluster is up, I have credentials to access to host, and then run the proper sql commands.
+To do this in an automated way I need to ensure that the cluster is up, I have credentials to access to host, as well as a medium to then run the proper sql commands.
 
 This is where the `AwsCustomResource` construct comes to save the day!
 This construct is perfect for one off scenarios where you need issue an AWS API call that doesn't have direct CloudFormation support.
 In this case, we want to run the `RDSDataService` `executeStatement` command, which executes a sql statement in the database host.
 I don't have to hardcode the database user credentials as the command will programatically access the required values to access the database host via a secret json object stored in Secrets Manager (the secret was created as a part of the ServerlessCluster construct).
+You can see this reference in the `secretArn: dbCluster.secret?.secretArn,` parameter.
+
+Lastly, i'm using some helper methods to allow for access within the security group for the database cluster.
+This security group will be referenced later when we create the VPC connector for AWS App Runner.
 
 ```typescript
 const dbCluster = new rds.ServerlessCluster(this, "AppRunnerDemoDatabase", {
@@ -156,7 +161,7 @@ Launching a container to Amazon ECS is straightforward (once you familiarize you
    Choosing where to run your container (Fargate, EC2, ECS Anywhere), logging configurations, volumes, IAM roles to attach, etc.
 2. Within the task definition, define the containers that will run when the task is launched.
    Here is where I configure container specific requirements, which in this instance is only to define the port that my container exposes and which container image to use. You can see in the code below that we are using the `ContainerImage` construct and taking advantage of the `fromAsset` method which will locate the Dockerfile and the CDK will build the image on our behalf and create/push to an ECR repo. There are additional flags that we can pass here, for more information check out the [documentation](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_ecs.ContainerDefinition.html).
-3. Determine how you want to launch your container: As a long running service, ad hoc, or as a part of some other orchestration like AWS Step Functions. In this case, we want ECS to ensure that the container is always running to serve traffic so we are creating an ECS Service to ensure the desired state is always met.
+3. Determine how you want to launch your container: As a long running service, ad hoc, or as a part of some other orchestration like AWS Step Functions. In this case, we want ECS to ensure that the container is always running to serve traffic so we are creating an ECS Service.
 
 The above flow is how we are defining and running our private ECS service, which is going to run in the private subnets of the VPC.
 Additionally, notice that when we create the service we define the name of the service under `cloudMapOptions`.
@@ -200,7 +205,7 @@ privateDemoService.connections.allowFromAnyIpv4(ec2.Port.tcp(8080));
 At the time of the creation of this walkthrough, the App Runner constructs avaialable are L1, which means they map directly to Cloudformation.
 There are a few things to discuss here, so I want to start by talking about how the App Runner service connects to the VPC.
 When connecting your service to an existing VPC, you need to create a VPC Connector in App Runner.
-The connector is what allows your App Runner service to egress into your VPC.
+The connector is what allows your App Runner service to egress the service into your VPC.
 For the connection to be established, a couple of parameters are required.
 First, you need to define the subnet id's that you want to egress into.
 Next, you will attach security groups to control network access into the VPC.
@@ -208,7 +213,7 @@ You can attach multiple security groups and multiple subnets to a VPC connector,
 Lastly, you can map multiple services to a single VPC connector, but only one VPC connector to a service.
 To dive into the deep details of how we implement this feature, check out this [blog](https://aws.amazon.com/blogs/containers/deep-dive-on-aws-app-runner-vpc-networking/)
 
-Next, we need to talk about the permission model and what permissions the app runner service needs vs what permissions the service needs while running.
+Next, we need to talk about the permission model and what permissions the App Runner needs (Not our code, but the AWS App Runner control plane) vs what permissions the service (my code/container) needs while running.
 This is a bit confusing, so let's break it down:
 
 - The App Runner service role: As it says in the name, this is the role for the App Runner service itself (not your application) to make AWS API calls on our behalf.
@@ -218,7 +223,7 @@ This is a bit confusing, so let's break it down:
 
 Finally we have our App Runner service. This is where we define the configuration of our service which includes how to build our service (source code or from a container image), which VPC connector to use (if any), auto scaling, service and instance roles, and so on.
 
-We have some environment variables set in the configuration, and you may notice that we pass the secret ARN from the secret we created for the database and stored in in Secrets Manager. As mentioned above, we need this ARN to know which secret we will reference when making the call in our code. In addition, we pass in the url of the private service running in Amazon ECS so the code knows how to communicate to the ECS service. It's generally a good practice to move dynamic values that change based on environment as environment variables.
+We have some environment variables set in the configuration, and you may notice that we pass the secret ARN from the secret we created for the database and stored in in Secrets Manager. As mentioned above, we need this ARN to know which secret we will reference when making the call in our code. In addition, we pass in the url of the private service running in Amazon ECS so the code knows how to communicate to the ECS service. It's generally a good practice to reference dynamic values that change based on environment as environment variables.
 
 ```typescript
 // Create an App Runner Service with a VPC Connector
@@ -339,7 +344,7 @@ We will be using this url to test the application momentarily.
    As mentioned in the [Meet the application](#meetapp) section, we have a public facing API service running in AWS App Runner.
    This service has a requirement to interact with a service running in Amazon ECS as well as a Postgres database cluster running in Amazon RDS.
    These resources both reside in a VPC and are not publicly accessible, meaning they have no direct ingress path from the internet.
-   Let's first start with the backend database, and walk through the application and confirm that we can communicate with the database, and then let's confirm we can actually write and read from it!
+   Let's first start with the backend database, and walk through the application and confirm that we can communicate with the database, and then let's confirm we can write to it and read from it!
    Next, we'll connect to the ecs service which resides in the VPC and is exposed via service discovery using AWS Cloud Map.
 
 If you want to see all of the paths available in the application, navigate to the url `/docs` path.
@@ -347,7 +352,7 @@ If you want to see all of the paths available in the application, navigate to th
    <details><summary> Postgres Database </summary>
 
 First, let's confirm that we can establish network connectivity to the backend database on the required port.
-To test this we will navigate to the `/test-connection` path, which will simply confirm via Netcat that we can establish a connection to the backend datanbase.
+To test this we will navigate to the `/test-connection` path, which will simply confirm via Netcat that we can establish a connection to the backend database.
 Here is a snippet of the code from the application to better understand:
 
 ```python
@@ -433,7 +438,7 @@ This will ensure that DNS can resolve when calling private hosted zones within t
 Because of this, our App Runner service is able to resolve the hostname for our ECS service via AWS Cloud Map.
 Our ECS service is calling the task metadata endpoint, which provides information about the task.
 For more information on the task metadata endpoint, see [here](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-metadata-endpoint.html).
-Below is the code for the ECS service to better understand how we are pulling and condensing the data for the response.
+Below is the code for the ECS service to better understand how we are pulling and compiling the data for the response.
 
 ```python
 def return_metadata():
@@ -452,7 +457,7 @@ def root():
     return JSONResponse(status_code=status.HTTP_200_OK, content=task_metadata)
 ```
 
-So that's it. If you want to prove that this is not a static response, hit the endpoint, kill the ECS task, and when the new one comes up hit the path again.
+So that's it. If you want to prove that this is not a static response, kill the ECS task that is running as a part of the service, and when the new one comes up hit the path again.
 You should see different data returned.
 
 </details>
@@ -464,4 +469,4 @@ In this walkthrough we built an App Runner service that connects into a VPC that
 Remember that we are not limited to RDS and ECS here, I simply chose those to provide a functional working example.
 The use cases are endless and whether that's talking to an Elasticache cluster, a Kubernetes service, or any other resource that resides in the VPC, you can make it happen!
 
-Keep an eye out for a [Containers from the couch](https://containersfromthecouch.com) livestream where i'll demo this live, on air!
+[![CFTC Video](https://img.youtube.com/vi/EX8mu-WOQpc/0.jpg)](https://cftc.info/36JOMeY)
