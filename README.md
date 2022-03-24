@@ -11,7 +11,7 @@ The entire environment has been automated using the AWS CDK (Cloud Development K
 Prior to deploying the environment, we will walk through the code to better understand what we are deploying.
 Let's get right into it.
 
-#### Meet the application
+#### <a name="meetapp"></a> Meet the application
 
 To get things started, let's review the application.
 
@@ -29,7 +29,7 @@ The application is comprised of two services:
 
 ![arch diagram](./App%20Runner%20VPC%20Connector%20Example.png)
 
-#### The code
+#### <a name="codereview"></a> Code Review
 
 As mentioned earlier, the environment is defined in Typescript using the AWS Cloud Development Kit.
 There are two files in which the code resides:
@@ -306,23 +306,100 @@ const appRunnerService = new aws_apprunner.CfnService(
 #### Deploy the environment
 
 To deploy the environment, we will use the AWS CDK.
-Once we conclude the deployment, we will walk through the App Runner console and deploy!
 
-1. Navigate to the `./cdk` directory and deploy the environment. (_NOTE:_ This will deploy a database and could incur cost in your AWS account)
+1. Navigate to the `./cdk` directory and deploy the environment. (_NOTE:_ This will deploy resources in your account and will incur cost.)
 
 ```
-
 cd cdk
 cdk deploy --require-approval never
-
 ```
 
-2.
+![cdkdeploygif](./cdkdeployarvpc.gif)
 
+This will take a few minutes, so if you haven't had a chance to review the code in the [code review](#codereview) section, now would be a good time to do that!
+
+Once the deployment is completed succesfully you should see the outputs from your stack. It will look something like this:
+
+![cdkoutputs](./cdkdeployoutputs.png)
+
+Copy the url for the App Runner service, which will have an output name that looks something like `AppRunnerVPCDemoCFTC.AppRunnerServiceUrl`.
+We will be using this url to test the application momentarily.
+
+2. Now that our application is deployed, let's walk through and confirm that we can in fact connect into our VPC and talk to the backend resources.
+   As mentioned in the [Meet the application](#meetapp) section, we have a public facing API service running in AWS App Runner.
+   This service has a requirement to interact with a service running in Amazon ECS as well as a Postgres database cluster running in Amazon RDS.
+   These resources both reside in a VPC and are not publicly accessible, meaning they have no direct ingress path from the internet.
+   Let's first start with the backend database, and walk through the application and confirm that we can communicate with the database, and then let's confirm we can actually write and read from it!
+
+If you want to see all of the paths available in the application, navigate to the url `/docs` path.
+
+   <details><summary> Postgres Database </summary>
+
+First, let's confirm that we can establish network connectivity to the backend database on the required port.
+To test this we will navigate to the `/test-connection` path, which will simply confirm via Netcat that we can establish a connection to the backend datanbase.
+Here is a snippet of the code from the application to better understand:
+
+```python
+TARGET = os.getenv("TARGET", "0.0.0.0")
+PORT = os.getenv("TARGETPORT", 8080)
+
+...
+
+@app.get("/test-connection")
+def test_connection():
+    result = sh.nc("-vz", "-w2", TARGET, PORT, _err_to_out=True).strip("\n")
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"Response": str(result)}
+    )
 ```
 
+Navigate to the url + `/test-connection` path now, what you should see is this:
+
+![testconnection](./testconnection.png)
+
+This is the response from the netcat command confirming that we can establish a TCP connection on port 5432 to the database cluster running in our vpc!
+Now let's actually write to the database.
+
+Navigate to the root of the url.
+The response should show this: `{"Response":"Registered request"}`.
+This means that the API was able to connect to the backend database and write to the table.
+Bellow are snippets from the code to better understand what is happening.
+We establish a connection to the Postgres db, execute our insert statement, and commit the transaction.
+
+```python
+def pg_client():
+    return psycopg.connect(
+        f"dbname={os.getenv('DB_NAME', 'apprunnerdemo')} password={os.getenv('DB_PASS')} user={os.getenv('DB_USER')} host={os.getenv('DB_HOST')}"
+    )
+
+def update_table(user_agent):
+    conn = pg_client()
+    try:
+        conn.execute(
+            f"INSERT INTO {TABLE_NAME}(last_update, user_agent) VALUES('{datetime.now().isoformat()}', '{user_agent}');"
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(e)
+    finally:
+        conn.close()
+
+...
+
+@app.get("/")
+def root(request: Request):
+    user_agent = request.headers.get("user-agent")
+    update_table(user_agent)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"Response": "Registered request"}
+    )
 ```
 
-```
+To confirm that we actually wrote to the database, we need to navigate to the `/recent-visits` path.
+This path is going to present the ten latest visitors to hit the root of the API, which is stored in our database in the VPC.
+You should see the value to the Response key as an array of the visits which has the timestamp and user agent.
+That's it! Our App Runner service has successfully connected to the backend database in our VPC!!!
 
-```
+![recentvisits](./recentvisits.png)
+
+   </details>

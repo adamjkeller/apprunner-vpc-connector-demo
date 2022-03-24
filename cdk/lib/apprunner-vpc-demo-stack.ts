@@ -10,10 +10,11 @@ import { Construct } from "constructs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as ecs from "aws-cdk-lib/aws-ecs";
-import * as ecsPatterns from "aws-cdk-lib/aws-ecs-patterns";
+import * as ecrAssets from "aws-cdk-lib/aws-ecr-assets";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as secretsmgr from "aws-cdk-lib/aws-secretsmanager";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
 import { SubnetType } from "aws-cdk-lib/aws-ec2";
 import { RetentionDays } from "aws-cdk-lib/aws-logs";
 
@@ -106,6 +107,12 @@ export class AppRunnerVPCDemo extends Stack {
       {}
     );
 
+    // Log group for private task
+    const privateServiceLogs = new logs.LogGroup(this, "PrivateSvcLogGrp", {
+      removalPolicy: RemovalPolicy.DESTROY,
+      retention: RetentionDays.ONE_DAY,
+    });
+
     privateTaskDef.addContainer("PrivateDemoService", {
       image: ecs.ContainerImage.fromAsset("../private_service"),
       portMappings: [
@@ -113,6 +120,10 @@ export class AppRunnerVPCDemo extends Stack {
           containerPort: 8080,
         },
       ],
+      logging: ecs.LogDriver.awsLogs({
+        streamPrefix: "appRunnerDemoECSPrivateService",
+        logGroup: privateServiceLogs,
+      }),
     });
 
     const privateDemoService = new ecs.FargateService(
@@ -173,6 +184,15 @@ export class AppRunnerVPCDemo extends Stack {
       },
     });
 
+    // Build a container image and push to ECR
+    const appRunnerContainerImage = new ecrAssets.DockerImageAsset(
+      this,
+      "ECRImage",
+      {
+        directory: "../demo_app",
+      }
+    );
+
     const appRunnerService = new aws_apprunner.CfnService(
       this,
       "AppRunnerVpcCXService",
@@ -181,7 +201,7 @@ export class AppRunnerVPCDemo extends Stack {
           autoDeploymentsEnabled: true,
           imageRepository: {
             imageRepositoryType: "ECR",
-            imageIdentifier: ncContainerDef.imageName,
+            imageIdentifier: appRunnerContainerImage.imageUri,
             imageConfiguration: {
               runtimeEnvironmentVariables: [
                 {
@@ -235,11 +255,6 @@ export class AppRunnerVPCDemo extends Stack {
     // App Runner URL output
     new CfnOutput(this, "AppRunnerServiceUrl", {
       value: `https://${appRunnerService.attrServiceUrl}`,
-    });
-
-    // ECS Frontend Service URL
-    new CfnOutput(this, "ECSLBServiceUrl", {
-      value: `http://${ncService.loadBalancer.loadBalancerDnsName}`,
     });
   }
 }
