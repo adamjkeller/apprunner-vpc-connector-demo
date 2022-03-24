@@ -221,6 +221,7 @@ Finally we have our App Runner service. This is where we define the configuratio
 We have some environment variables set in the configuration, and you may notice that we pass the secret ARN from the secret we created for the database and stored in in Secrets Manager. As mentioned above, we need this ARN to know which secret we will reference when making the call in our code. In addition, we pass in the url of the private service running in Amazon ECS so the code knows how to communicate to the ECS service. It's generally a good practice to move dynamic values that change based on environment as environment variables.
 
 ```typescript
+// Create an App Runner Service with a VPC Connector
 const appRunnerVpcConnector = new aws_apprunner.CfnVpcConnector(
   this,
   "AppRunnerVPCCon",
@@ -257,6 +258,15 @@ const appRunnerInstanceRole = new iam.Role(this, "AppRunnerInstanceRole", {
   },
 });
 
+// Build a container image and push to ECR
+const appRunnerContainerImage = new ecrAssets.DockerImageAsset(
+  this,
+  "ECRImage",
+  {
+    directory: "../demo_app",
+  }
+);
+
 const appRunnerService = new aws_apprunner.CfnService(
   this,
   "AppRunnerVpcCXService",
@@ -265,7 +275,7 @@ const appRunnerService = new aws_apprunner.CfnService(
       autoDeploymentsEnabled: true,
       imageRepository: {
         imageRepositoryType: "ECR",
-        imageIdentifier: ncContainerDef.imageName,
+        imageIdentifier: appRunnerContainerImage.imageUri,
         imageConfiguration: {
           runtimeEnvironmentVariables: [
             {
