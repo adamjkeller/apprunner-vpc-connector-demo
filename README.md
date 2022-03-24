@@ -330,6 +330,7 @@ We will be using this url to test the application momentarily.
    This service has a requirement to interact with a service running in Amazon ECS as well as a Postgres database cluster running in Amazon RDS.
    These resources both reside in a VPC and are not publicly accessible, meaning they have no direct ingress path from the internet.
    Let's first start with the backend database, and walk through the application and confirm that we can communicate with the database, and then let's confirm we can actually write and read from it!
+   Next, we'll connect to the ecs service which resides in the VPC and is exposed via service discovery using AWS Cloud Map.
 
 If you want to see all of the paths available in the application, navigate to the url `/docs` path.
 
@@ -403,3 +404,54 @@ That's it! Our App Runner service has successfully connected to the backend data
 ![recentvisits](./recentvisits.png)
 
    </details>
+
+<details><summary> Backend ECS Service </summary>
+Our ECS Service is long running, and listens on port 8080. 
+The job of the backend service is to capture it's metadata and return the details to the caller.
+Because containers are ephemeral in nature, we have to expect that they will come and go as our application scales in and out, deployments occur, and/or the scheduler finds an unhealthy task and replaces it.
+To help deal with this, we communicate with the backend service using service discovery which will register our tasks behind a DNS record, which our frontend application will use to communicate with the backend service.
+
+Navigate to the App Runner URL and go to the `/ecs-private-service` path.
+The response will look something like this:
+
+```
+{"Response":"b'{\"TaskArn\":\"arn:aws:ecs:us-west-2:333258026273:task/AppRunnerVPCDemo-test-AppRunnerDemoClusterC761BD81-Qo8XjPs4wZgL/f7265048cbbd449ab8d93c6b2a79e4ed\",\"Cluster\":\"arn:aws:ecs:us-west-2:333258026273:cluster/AppRunnerVPCDemo-test-AppRunnerDemoClusterC761BD81-Qo8XjPs4wZgL\",\"LaunchType\":\"FARGATE\",\"ServiceName\":\"PrivateDemoService\",\"IpAddress\":\"10.0.183.135\"}'"}
+```
+
+So how was this able to happen? It starts with our VPC, which has DNS resolution enabled (by default in the VPC construct via the AWS CDK).
+This will ensure that DNS can resolve when calling private hosted zones within the VPC.
+Because of this, our App Runner service is able to resolve the hostname for our ECS service via AWS Cloud Map.
+Our ECS service is calling the task metadata endpoint, which provides information about the task.
+For more information on the task metadata endpoint, see [here](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-metadata-endpoint.html).
+Below is the code for the ECS service to better understand how we are pulling and condensing the data for the response.
+
+```python
+def return_metadata():
+    resp = requests.get(os.getenv("ECS_CONTAINER_METADATA_URI_V4") + "/task").json()
+    return {
+        "TaskArn": resp.get("TaskARN"),
+        "Cluster": resp.get("Cluster"),
+        "LaunchType": resp.get("LaunchType"),
+        "ServiceName": resp.get("Containers")[0]["Name"],
+        "IpAddress": resp.get("Containers")[0]["Networks"][0]["IPv4Addresses"][0],
+    }
+
+@app.get("/")
+def root():
+    task_metadata = return_metadata()
+    return JSONResponse(status_code=status.HTTP_200_OK, content=task_metadata)
+```
+
+So that's it. If you want to prove that this is not a static response, hit the endpoint, kill the ECS task, and when the new one comes up hit the path again.
+You should see different data returned.
+
+</details>
+
+#### Wrapping up
+
+That's it folks!
+In this walkthrough we built an App Runner service that connects into a VPC that has resources running within the private subnets.
+Remember that we are not limited to RDS and ECS here, I simply chose those to provide a functional working example.
+The use cases are endless and whether that's talking to an Elasticache cluster, a Kubernetes service, or any other resource that resides in the VPC, you can make it happen!
+
+Keep an eye out for a [Containers from the couch](https://containersfromthecouch.com) livestream where i'll demo this live, on air!
